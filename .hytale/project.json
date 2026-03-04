@@ -1,0 +1,10 @@
+{
+  "groupId": "com.example",
+  "artifactId": "clientside-visuals",
+  "modName": "ClientsideVisuals",
+  "version": "0.1.0",
+  "buildSystem": "Gradle",
+  "language": "Java",
+  "jarPath": "build/libs/clientside-visuals-0.1.0.jar",
+  "buildTask": "shadowJar"
+}

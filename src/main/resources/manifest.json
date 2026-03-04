@@ -1,0 +1,10 @@
+{
+  "Group": "com.landofsharks",
+  "Name": "ClientsideVisuals",
+  "Version": "0.1.0",
+  "Description": "A Hytale server mod, for sending clientside visuals.",
+  "Authors": [{"Name": "SharkeyMyrl"}],
+  "Main": "com.landofsharks.clientsidevisuals.ClientsideVisualsPlugin",
+  "LoadOrder": "POSTWORLD",
+  "IncludesAssetPack": true
+}
