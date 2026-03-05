@@ -22,28 +22,34 @@ import java.util.logging.Level;
 
 /**
  * Clientside rendering service with autonomous ticker for persistent visualizations.
- * 
- * This service automatically refreshes visualizations registered through VisualizationManager instances.
- * Systems only need to manipulate the data in their VisualizationManager, and the ticker
- * handles periodic re-rendering to keep visuals on-screen.
- * 
- * PlayerRefs are looked up on-demand from Universe rather than cached, ensuring
- * references remain valid even if players disconnect/reconnect.
- * 
- * Only lightweight render state is cached per-player: matrix buffers and throttle timestamps.
+ *
+ * <p>This service automatically refreshes visualizations registered through
+ * {@link VisualizationManager} instances. Systems only need to manipulate the data in their
+ * manager, and the ticker handles periodic re-rendering to keep visuals on-screen.
+ *
+ * <p>PlayerRefs are looked up on-demand from {@link Universe} rather than cached, ensuring
+ * references remain valid even if players disconnect and reconnect.
+ *
+ * <p>Only lightweight render state is cached per-player: matrix buffers and throttle timestamps.
+ *
+ * <h2>Thread safety</h2>
+ * {@link #registerManager} and {@link #unregisterManager} are {@code synchronized} and safe to
+ * call from any thread. {@link #debugVisuals} is safe to call concurrently for different players
+ * because throttle state and matrix buffers are stored in {@link ConcurrentHashMap}. Calling
+ * {@link #debugVisuals} concurrently for the <em>same</em> player is not recommended; the
+ * per-player matrix buffer is reused without further synchronization.
  */
 public class ClientsideVisualizerService {
 
     private static final long RENDER_INTERVAL_MS = 300L;
     private static final long TICKER_INTERVAL_MS = 1000L; // Refresh every 1 second
-    private static final float DISPLAY_TIME = 2.0F; // Visuals expire after 2s, but ticker re-sends them
+    private static final float DISPLAY_TIME = 1.5F; // Visuals expire after 1.5s, but ticker re-sends them
     private static final float SHAPE_OPACITY = 0.1F;
     private static final float EDGE_THICKNESS = 0.08F;
 
     private final Map<UUID, Long> lastRenderTime = new ConcurrentHashMap<>();
     private final Map<UUID, float[]> matrixBuffers = new ConcurrentHashMap<>();
     
-    // Registered visualization managers that the ticker will monitor
     private final List<VisualizationManager> registeredManagers = new ArrayList<>();
     private ScheduledFuture<?> tickerTask = null;
     private volatile boolean running = false;
@@ -60,17 +66,18 @@ public class ClientsideVisualizerService {
     }
 
     /**
-     * Create a new visualizer service and start the ticker.
+     * Create a new visualizer service and start the background ticker.
      */
     public ClientsideVisualizerService() {
         startTicker();
     }
 
     /**
-     * Register a VisualizationManager to be monitored by the ticker.
-     * The ticker will automatically refresh all visualizations in this manager.
-     * 
-     * @param manager The manager to register
+     * Register a {@link VisualizationManager} to be monitored by the ticker.
+     * The ticker will automatically refresh all visualizations in the manager on each interval.
+     * Registering the same manager more than once is a no-op.
+     *
+     * @param manager the manager to register
      */
     public synchronized void registerManager(@Nonnull VisualizationManager manager) {
         if (!registeredManagers.contains(manager)) {
@@ -80,10 +87,10 @@ public class ClientsideVisualizerService {
     }
 
     /**
-     * Unregister a VisualizationManager from the ticker.
-     * Optional - all managers are automatically cleared during shutdown.
-     * 
-     * @param manager The manager to unregister
+     * Unregister a {@link VisualizationManager} from the ticker.
+     * This is optional; all managers are automatically cleared during {@link #shutdown()}.
+     *
+     * @param manager the manager to unregister
      */
     public synchronized void unregisterManager(@Nonnull VisualizationManager manager) {
         registeredManagers.remove(manager);
@@ -91,7 +98,8 @@ public class ClientsideVisualizerService {
     }
 
     /**
-     * Start the background ticker that refreshes visualizations.
+     * Start the background ticker that periodically refreshes all registered visualizations.
+     * If the ticker is already running this method is a no-op.
      */
     private synchronized void startTicker() {
         if (tickerTask != null) {
@@ -110,6 +118,7 @@ public class ClientsideVisualizerService {
 
     /**
      * Stop the background ticker.
+     * Any in-progress tick is allowed to complete before the task is cancelled.
      */
     private synchronized void stopTicker() {
         running = false;
@@ -121,8 +130,10 @@ public class ClientsideVisualizerService {
     }
 
     /**
-     * Ticker method that refreshes all registered visualizations.
-     * This runs periodically to keep visuals persistent.
+     * Ticker callback that refreshes all registered visualizations.
+     * Runs on a fixed interval to keep client-side visuals persistent.
+     * Exceptions from individual managers are caught and logged so that one
+     * misbehaving manager cannot stall the others.
      */
     private void tickAllVisualizations() {
         if (!running) {
@@ -144,7 +155,10 @@ public class ClientsideVisualizerService {
     }
 
     /**
-     * Refresh visualizations for all players in a specific manager.
+     * Refresh all visualizations owned by a single manager.
+     * Skips players whose {@link PlayerRef} is no longer valid.
+     *
+     * @param manager the manager whose visualizations should be refreshed
      */
     private void tickManager(@Nonnull VisualizationManager manager) {
         // Get all players with visualizations in this manager
@@ -168,10 +182,9 @@ public class ClientsideVisualizerService {
     }
 
     /**
-     * Clear all debug shapes for a player.
-     * Sends a ClearDebugShapes packet to remove all visualizations.
-     * 
-     * @param playerUUID The player UUID
+     * Send a {@link ClearDebugShapes} packet to remove all debug visualizations for a player.
+     *
+     * @param playerUUID the UUID of the player whose visuals should be cleared
      */
     public void clearPlayer(@Nonnull UUID playerUUID) {
         PlayerRef playerRef = Universe.get().getPlayer(playerUUID);
@@ -185,11 +198,11 @@ public class ClientsideVisualizerService {
     }
 
     /**
-     * Clear cached render state for a player.
-     * Removes throttle timestamps and matrix buffers.
-     * Called when a player disconnects or becomes invalid.
-     * 
-     * @param playerUUID The player UUID
+     * Evict cached render state for a player.
+     * Removes the throttle timestamp and reusable matrix buffer associated with the UUID.
+     * Called when a player's {@link PlayerRef} is found to be invalid during a render attempt.
+     *
+     * @param playerUUID the UUID of the player whose cache should be cleared
      */
     private void clearPlayerCache(@Nonnull UUID playerUUID) {
         lastRenderTime.remove(playerUUID);
@@ -197,12 +210,17 @@ public class ClientsideVisualizerService {
     }
 
     /**
-     * Render debug visualizations for a player with throttling.
-     * Uses greedy cuboid algorithm to batch adjacent blocks for efficiency.
-     * 
-     * @param playerUUID The player UUID
-     * @param positions Block positions to visualize
-     * @param color RGB color (0.0-1.0)
+     * Render debug visualizations for a player with throttling enabled.
+     * Delegates to {@link #debugVisuals(UUID, Vector3i[], Vector3f, boolean)} with
+     * {@code respectThrottle = true}, enforcing a minimum of {@value RENDER_INTERVAL_MS} ms
+     * between successive renders for the same player.
+     *
+     * <p>Adjacent positions are automatically merged into larger AABBs via a greedy cuboid
+     * algorithm to reduce the number of debug shapes sent to the client.
+     *
+     * @param playerUUID the UUID of the player to render for
+     * @param positions  block positions to visualize; {@code null} entries are ignored
+     * @param color      RGB color with each component in the range {@code [0.0, 1.0]}
      */
     public void debugVisuals(@Nonnull UUID playerUUID,
                              @Nonnull Vector3i[] positions,
@@ -212,12 +230,18 @@ public class ClientsideVisualizerService {
     
     /**
      * Render debug visualizations for a player.
-     * Uses greedy cuboid algorithm to merge adjacent blocks into larger AABBs.
-     * 
-     * @param playerUUID The player UUID
-     * @param positions Block positions to visualize
-     * @param color RGB color (0.0-1.0)
-     * @param respectThrottle If true, enforces render throttle (300ms between updates)
+     * Adjacent positions are merged into the largest possible AABBs using a greedy cuboid
+     * algorithm, minimizing the number of {@link DisplayDebug} packets sent per frame.
+     *
+     * <p>If the player's {@link PlayerRef} is invalid, cached render state for that player
+     * is evicted and the method returns immediately.
+     *
+     * @param playerUUID      the UUID of the player to render for
+     * @param positions       block positions to visualize; {@code null} entries are ignored
+     * @param color           RGB color with each component in the range {@code [0.0, 1.0]}
+     * @param respectThrottle if {@code true}, skips rendering when fewer than
+     *                        {@value RENDER_INTERVAL_MS} ms have elapsed since the last render
+     *                        for this player
      */
     public void debugVisuals(@Nonnull UUID playerUUID,
                              @Nonnull Vector3i[] positions,
@@ -256,8 +280,9 @@ public class ClientsideVisualizerService {
     }
 
     /**
-     * Shutdown the visualizer service.
-     * Stops the ticker, clears all caches and registered managers.
+     * Shut down the visualizer service.
+     * Stops the background ticker and clears all registered managers, throttle
+     * timestamps, and matrix buffer caches.
      */
     public void shutdown() {
         stopTicker();
@@ -269,13 +294,13 @@ public class ClientsideVisualizerService {
     }
 
     /**
-     * Render a single AABB as a debug cuboid for a player.
-     * Creates and caches transformation matrices for efficient rendering.
-     * 
-     * @param playerRef The player reference
-     * @param playerUUID The player UUID (for matrix caching)
-     * @param aabb The axis-aligned bounding box to render
-     * @param color RGB color (0.0-1.0)
+     * Decompose an {@link AABB} into 12 edge segments and render each as a thin cuboid.
+     * Four edges run along each axis, forming a wireframe outline of the bounding box.
+     *
+     * @param playerRef  the target player
+     * @param playerUUID the player's UUID, used to look up the reusable matrix buffer
+     * @param aabb       the axis-aligned bounding box to render
+     * @param color      RGB color with each component in the range {@code [0.0, 1.0]}
      */
     private void renderAABB(@Nonnull PlayerRef playerRef, @Nonnull UUID playerUUID,
                             @Nonnull AABB aabb, @Nonnull Vector3f color) {
@@ -317,6 +342,25 @@ public class ClientsideVisualizerService {
         sendCube(playerRef, playerUUID, x2, y2, centerZ, EDGE_THICKNESS, EDGE_THICKNESS, lengthZ, color, false);
     }
 
+    /**
+     * Build a {@link DisplayDebug} packet for a single axis-aligned cuboid and write it to the
+     * player's packet handler. The transformation matrix is assembled in a per-player buffer
+     * that is allocated once and reused on subsequent calls to avoid repeated allocation.
+     *
+     * <p>If {@link #OPACITY_FIELD} was resolved at class-load time, the packet's opacity field
+     * is set reflectively; otherwise the field is silently left at its default value.
+     *
+     * @param playerRef  the target player
+     * @param playerUUID the player's UUID, used to look up the reusable matrix buffer
+     * @param x          world-space center X of the cuboid
+     * @param y          world-space center Y of the cuboid
+     * @param z          world-space center Z of the cuboid
+     * @param scaleX     half-extent (scale) along the X axis
+     * @param scaleY     half-extent (scale) along the Y axis
+     * @param scaleZ     half-extent (scale) along the Z axis
+     * @param color      RGB color with each component in the range {@code [0.0, 1.0]}
+     * @param fade       whether the shape should fade out as it approaches its expiry time
+     */
     private void sendCube(@Nonnull PlayerRef playerRef, @Nonnull UUID playerUUID,
                           float x, float y, float z, float scaleX, float scaleY, float scaleZ,
                           @Nonnull Vector3f color, boolean fade) {
@@ -443,10 +487,10 @@ public class ClientsideVisualizerService {
         }
 
         /**
-         * Check if a position contains a voxel.
-         * 
-         * @param pos The position to check
-         * @return true if the position contains a voxel
+         * Check whether a position falls within the grid and contains a voxel.
+         *
+         * @param pos the position to test
+         * @return {@code true} if the position is occupied
          */
         boolean contains(@Nonnull Vector3i pos) {
             int x = pos.x - minX;
@@ -459,10 +503,10 @@ public class ClientsideVisualizerService {
         }
 
         /**
-         * Check if a position has already been rendered.
-         * 
-         * @param pos The position to check
-         * @return true if the position has been rendered
+         * Check whether a position has already been included in a rendered AABB.
+         *
+         * @param pos the position to test
+         * @return {@code true} if the position has been marked rendered
          */
         boolean isRendered(@Nonnull Vector3i pos) {
             int x = pos.x - minX;
@@ -475,9 +519,10 @@ public class ClientsideVisualizerService {
         }
 
         /**
-         * Mark a position as rendered.
-         * 
-         * @param pos The position to mark
+         * Mark a position as rendered so it is excluded from future merges.
+         * Out-of-bounds positions are silently ignored.
+         *
+         * @param pos the position to mark
          */
         void markRendered(@Nonnull Vector3i pos) {
             int x = pos.x - minX;
@@ -489,12 +534,14 @@ public class ClientsideVisualizerService {
         }
 
         /**
-         * Find and merge adjacent voxels starting from a seed position.
-         * Uses greedy expansion in all 6 directions to create the largest possible AABB.
-         * Marks all voxels in the merged region as rendered.
-         * 
-         * @param seed The starting position
-         * @return The merged AABB, or null if seed is invalid or already rendered
+         * Greedily expand from {@code seed} in all six axis-aligned directions to find the
+         * largest AABB that contains only occupied, unrendered voxels. All voxels within the
+         * resulting region are immediately marked rendered to prevent them from being included
+         * in a subsequent merge.
+         *
+         * @param seed the starting position for the expansion
+         * @return the merged {@link AABB}, or {@code null} if {@code seed} is unoccupied or
+         *         has already been rendered
          */
         AABB findMergedRegion(@Nonnull Vector3i seed) {
             if (!contains(seed) || isRendered(seed)) {
@@ -521,13 +568,17 @@ public class ClientsideVisualizerService {
         }
 
         /**
-         * Expand an AABB in a specific direction as far as possible.
-         * Checks if all voxels in the expansion plane are valid and unrendered.
-         * 
-         * @param region The AABB to expand
-         * @param dx Direction X (-1, 0, or 1)
-         * @param dy Direction Y (-1, 0, or 1)
-         * @param dz Direction Z (-1, 0, or 1)
+         * Attempt to extend {@code region} one step at a time in the given direction.
+         * Before each extension the entire new face of voxels is validated: every position
+         * must be occupied and not yet rendered. Expansion halts as soon as the face check
+         * fails. Exactly one of {@code dx}, {@code dy}, {@code dz} must be non-zero
+         * ({@code -1} or {@code +1}); the other two must be {@code 0} to indicate the axes
+         * that form the swept face.
+         *
+         * @param region the AABB to expand in-place
+         * @param dx     step along X: {@code -1}, {@code 0}, or {@code 1}
+         * @param dy     step along Y: {@code -1}, {@code 0}, or {@code 1}
+         * @param dz     step along Z: {@code -1}, {@code 0}, or {@code 1}
          */
         private void expandDirection(@Nonnull AABB region, int dx, int dy, int dz) {
             while (true) {
@@ -576,8 +627,14 @@ public class ClientsideVisualizerService {
     }
 
     /**
-     * Helper method to send fake blocks to a player.
-     * Kept for potential future use.
+     * Send fake block packets to a player, replacing the visual appearance of blocks at the
+     * given positions without modifying the actual world state.
+     * Currently unused; retained for potential future use.
+     *
+     * @param playerRef  the target player
+     * @param positions  world positions at which to display fake blocks
+     * @param blockTypes block type names to display (e.g. {@code "hytale:stone"});
+     *                   see {@link #resolveBlockIds} for resolution rules
      */
     private void sendFakeBlocks(@Nonnull PlayerRef playerRef, @Nonnull Vector3i[] positions, 
                                 @Nonnull String[] blockTypes) {
@@ -594,14 +651,23 @@ public class ClientsideVisualizerService {
         }
     }
 
-    @Nonnull
     /**
-     * Resolve string block type names to numeric block IDs.
-     * 
-     * @param positionCount Number of positions
-     * @param blockTypes Array of block type names
-     * @return Array of resolved block IDs (0 for invalid names)
+     * Resolve an array of block type names to numeric block IDs.
+     *
+     * <p>Two resolution strategies are applied depending on whether the number of names matches
+     * the number of positions:
+     * <ul>
+     *   <li>If {@code blockTypes.length == positionCount}, each name is resolved individually
+     *       and mapped to the corresponding position.</li>
+     *   <li>Otherwise, the first name that resolves to a valid ID is used for every position.</li>
+     * </ul>
+     *
+     * @param positionCount number of positions that need a block ID
+     * @param blockTypes    array of block type names to resolve
+     * @return array of length {@code positionCount} containing resolved IDs;
+     *         entries are negative for names that could not be resolved
      */
+    @Nonnull
     private int[] resolveBlockIds(int positionCount, @Nonnull String[] blockTypes) {
         int[] resolved = new int[positionCount];
 
@@ -627,10 +693,12 @@ public class ClientsideVisualizerService {
     }
 
     /**
-     * Resolve a single block type name to a numeric block ID.
-     * 
-     * @param blockTypeName The block type name (e.g., "hytale:air")
-     * @return The block ID, or 0 if the name is invalid
+     * Resolve a single block type name to a numeric block ID via the asset map.
+     *
+     * @param blockTypeName the namespaced block type name (e.g. {@code "hytale:air"}),
+     *                      or {@code null}
+     * @return the positive block ID, or {@code -1} if the name is {@code null}, blank,
+     *         or not found in the asset map
      */
     private int resolveBlockId(@Nullable String blockTypeName) {
         if (blockTypeName == null || blockTypeName.isBlank()) {
