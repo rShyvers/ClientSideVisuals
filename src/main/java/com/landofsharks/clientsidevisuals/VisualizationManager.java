@@ -19,7 +19,7 @@ import java.util.concurrent.ConcurrentHashMap;
  * background ticker, so visualizations persist on-screen without any further action from the
  * owning system.
  *
- * <h2>Two rendering modes</h2>
+ * <h2>Two registration modes</h2>
  * <ul>
  *   <li><b>Single mode</b> ({@code set*} methods) — registers a visualization under the
  *       reserved key {@code "default"}, clearing all previously registered sets for that
@@ -31,49 +31,52 @@ import java.util.concurrent.ConcurrentHashMap;
  *
  * <h2>Supported visualization types</h2>
  * <ul>
- *   <li><b>Debug visuals</b> — colored wireframe cuboids rendered via
- *       {@link com.hypixel.hytale.protocol.packets.player.DisplayDebug} packets. Adjacent
- *       positions are automatically merged into larger AABBs by the rendering pipeline.</li>
- *   <li><b>Fake doors</b> — client-side block replacements sent via
- *       {@link com.hypixel.hytale.protocol.packets.world.ServerSetBlock} packets. Clearing
- *       or disabling a fake-door set automatically reverts the affected positions to their
- *       real world blocks.</li>
+ *   <li>{@link ClientsideVisualizationHandler.VectorSet.DebugVisual} — colored wireframe
+ *       cuboids. Adjacent positions are merged into larger AABBs by the rendering pipeline.</li>
+ *   <li>{@link ClientsideVisualizationHandler.VectorSet.Replace} — stamps a fixed block ID
+ *       onto every position client-side.</li>
+ *   <li>{@link ClientsideVisualizationHandler.VectorSet.Mirror} — copies real block data from
+ *       source positions to target positions client-side.</li>
  * </ul>
  *
  * <h2>Lifecycle</h2>
- * Manual unregistration is optional; all managers are cleared automatically when the server
- * shuts down. Call {@link ClientsideVisualizationHandler#unregisterManager} explicitly only
- * if you need to stop visualizations before plugin shutdown.
+ * Manual unregistration is optional; all managers are cleared automatically on shutdown.
+ * Call {@link ClientsideVisualizationHandler#unregisterManager} explicitly only if you need
+ * to stop visualizations before plugin shutdown.
  *
  * <h2>Thread safety</h2>
- * Internal state is stored in {@link java.util.concurrent.ConcurrentHashMap} instances.
- * Individual read-modify-write operations (e.g. {@link #clearAndRegisterVectorSet}) are not
- * atomically synchronized, so concurrent mutations for the same player from multiple threads
- * are not recommended.
+ * Internal state is stored in {@link ConcurrentHashMap} instances. Individual read-modify-write
+ * operations (e.g. {@link #clearAndRegisterVectorSet}) are not atomically synchronized, so
+ * concurrent mutations for the same player from multiple threads are not recommended.
  */
 public class VisualizationManager {
+
     /**
      * Human-readable identifier for this manager instance.
      * Used in log messages to distinguish output from different systems.
      */
     @Nonnull
     private final String systemId;
-    
+
     /**
      * Primary visualization state: player UUID → (set ID → vector set).
      * The outer map is a {@link ConcurrentHashMap} for safe cross-thread iteration by the ticker.
-     * The inner maps are also {@link ConcurrentHashMap} instances created lazily on first write.
+     * Inner maps are also {@link ConcurrentHashMap} instances, created lazily on first write.
      */
     @Nonnull
-    private final Map<UUID, Map<String, ClientsideVisualizationHandler.VectorSet>> playerVectorSets = new ConcurrentHashMap<>();
+    private final Map<UUID, Map<String, ClientsideVisualizationHandler.VectorSet>> playerVectorSets
+            = new ConcurrentHashMap<>();
+
+    // -------------------------------------------------------------------------
+    // Construction
+    // -------------------------------------------------------------------------
 
     /**
      * Create a new {@code VisualizationManager} with the given system ID and register it for
      * ticker-based persistence.
      *
      * @param systemId a unique, human-readable identifier for the owning system
-     *                 (e.g. {@code "greenhouse_main"}, {@code "zone_system"});
-     *                 used in log output to distinguish managers
+     *                 (e.g. {@code "greenhouse_main"}, {@code "zone_system"})
      * @throws NullPointerException if {@code systemId} is {@code null}
      */
     public VisualizationManager(@Nonnull String systemId) {
@@ -84,7 +87,7 @@ public class VisualizationManager {
     /**
      * Create a new {@code VisualizationManager} with an auto-generated system ID and register
      * it for ticker-based persistence. The generated ID is based on the instance's identity
-     * hash code (e.g. {@code "system_1234567890"}) and is stable for the lifetime of this object.
+     * hash code (e.g. {@code "system_1234567890"}).
      */
     public VisualizationManager() {
         this.systemId = "system_" + System.identityHashCode(this);
@@ -93,7 +96,6 @@ public class VisualizationManager {
 
     /**
      * Return the unique system ID for this manager.
-     * Used in log output and for distinguishing managers during debugging.
      *
      * @return the system ID; never {@code null}
      */
@@ -102,139 +104,110 @@ public class VisualizationManager {
         return systemId;
     }
 
+    // -------------------------------------------------------------------------
+    // Single-mode (set*) — replaces all existing sets for the player
+    // -------------------------------------------------------------------------
+
     /**
-     * Register a debug-visual set for a player, replacing all other sets previously
-     * registered for that player in this manager.
-     * The set is stored under the key {@code "default"}.
+     * Register a debug-visual set for a player under the key {@code "default"},
+     * replacing all previously registered sets for that player.
      *
      * @param playerId  the target player's UUID
      * @param positions block positions to render wireframe cuboids at
      * @param color     RGB color with each component in the range {@code [0.0, 1.0]}
-     * @throws NullPointerException if any argument is {@code null}
      */
     public void setDebugVisuals(@Nonnull UUID playerId, @Nonnull Vector3i[] positions, @Nonnull Vector3f color) {
         Objects.requireNonNull(playerId, "Player ID cannot be null");
         Objects.requireNonNull(positions, "Positions cannot be null");
         Objects.requireNonNull(color, "Color cannot be null");
-        
-        ClientsideVisualizationHandler.VectorSet set = ClientsideVisualizationHandler.VectorSet.debugVisual(positions, color);
-        clearAndRegisterVectorSet(playerId, "default", set);
+
+        clearAndRegisterVectorSet(playerId, "default",
+                new ClientsideVisualizationHandler.VectorSet.DebugVisual(positions, color));
     }
 
     /**
-     * Register a debug-visual set for a player using an axis-aligned bounding box, replacing
-     * all other sets previously registered for that player in this manager.
-     * All block positions within the box (inclusive on all faces) are expanded and stored
-     * under the key {@code "default"}.
+     * Register a debug-visual set for a player using a bounding box, replacing all previously
+     * registered sets for that player. All positions within the box (inclusive) are expanded
+     * before storage. Stored under the key {@code "default"}.
      *
      * @param playerId the target player's UUID
-     * @param min      the minimum corner of the bounding box (component order need not be
-     *                 pre-sorted; components are normalized internally)
-     * @param max      the maximum corner of the bounding box
+     * @param min      one corner of the bounding box
+     * @param max      the opposite corner of the bounding box
      * @param color    RGB color with each component in the range {@code [0.0, 1.0]}
-     * @throws NullPointerException if any argument is {@code null}
      */
-    public void setDebugVisuals(@Nonnull UUID playerId, @Nonnull Vector3i min, @Nonnull Vector3i max, @Nonnull Vector3f color) {
+    public void setDebugVisuals(@Nonnull UUID playerId, @Nonnull Vector3i min, @Nonnull Vector3i max,
+                                @Nonnull Vector3f color) {
         Objects.requireNonNull(playerId, "Player ID cannot be null");
         Objects.requireNonNull(min, "Min position cannot be null");
         Objects.requireNonNull(max, "Max position cannot be null");
         Objects.requireNonNull(color, "Color cannot be null");
-        
-        Vector3i[] positions = generatePositionsInBoundingBox(min, max);
-        setDebugVisuals(playerId, positions, color);
+
+        setDebugVisuals(playerId, expandBoundingBox(min, max), color);
     }
 
     /**
-     * Register a self-referential fake-door set for a player, replacing all other sets
-     * previously registered for that player in this manager.
-     * Each position in {@code positions} will have its own real world block data re-sent to
-     * the client. This is useful for forcing a client refresh of blocks that may be out of
-     * sync rather than displaying a different block.
-     * Stored under the key {@code "default"}.
+     * Stamp a fixed block ID onto every position for a player, replacing all previously
+     * registered sets for that player. Stored under the key {@code "default"}.
      *
      * @param playerId  the target player's UUID
-     * @param positions block positions whose real block state will be re-sent to the client
-     * @throws NullPointerException if any argument is {@code null}
+     * @param positions positions that will display the replacement block
+     * @param blockId   the block ID to send to every position
+     * @param rotation  rotation byte to apply (use {@code 0} for no rotation)
      */
-    public void setFakeDoors(@Nonnull UUID playerId, @Nonnull Vector3i[] positions) {
+    public void setReplace(@Nonnull UUID playerId, @Nonnull Vector3i[] positions,
+                           int blockId, byte rotation) {
         Objects.requireNonNull(playerId, "Player ID cannot be null");
         Objects.requireNonNull(positions, "Positions cannot be null");
 
-        setFakeDoors(playerId, positions, positions);
+        clearAndRegisterVectorSet(playerId, "default",
+                new ClientsideVisualizationHandler.VectorSet.Replace(positions, blockId, rotation));
     }
 
     /**
-     * Register a fake-door set for a player, replacing all other sets previously registered
-     * for that player in this manager.
-     * For each index {@code i}, the block found at {@code toPositions[i]} in the world will
-     * be sent to the client at {@code fromPositions[i]}.
-     * Stored under the key {@code "default"}.
+     * Stamp a fixed block ID (with no rotation) onto every position for a player, replacing
+     * all previously registered sets for that player. Stored under the key {@code "default"}.
      *
-     * @param playerId      the target player's UUID
-     * @param fromPositions client-side positions where fake blocks will appear
-     * @param toPositions   world positions whose block data will be read; must have the same
-     *                      length as {@code fromPositions}
-     * @throws NullPointerException if any argument is {@code null}
+     * @param playerId  the target player's UUID
+     * @param positions positions that will display the replacement block
+     * @param blockId   the block ID to send to every position
      */
-    private void setFakeDoors(@Nonnull UUID playerId, @Nonnull Vector3i[] fromPositions, @Nonnull Vector3i[] toPositions) {
+    public void setReplace(@Nonnull UUID playerId, @Nonnull Vector3i[] positions, int blockId) {
+        setReplace(playerId, positions, blockId, (byte) 0);
+    }
+
+    /** Legacy Support */
+    public void setFakeDoors(@Nonnull UUID playerId, @Nonnull Vector3i[] positions) {
+        setReplace(playerId, positions, 0, (byte) 0);
+    }
+
+    /** Legacy Support */
+    public void setFakeDoors(@Nonnull UUID playerId, @Nonnull Vector3i min, @Nonnull Vector3i max) {
+        setReplace(playerId, expandBoundingBox(min, max), 0, (byte) 0);
+    }
+
+
+    /**
+     * Mirror block data from {@code fromPositions} onto {@code toPositions} for a player,
+     * replacing all previously registered sets for that player. Stored under the key
+     * {@code "default"}.
+     *
+     * @param playerId     the target player's UUID
+     * @param fromPositions world positions whose block data (id, filler, rotation) will be read
+     * @param toPositions   client-side positions where that block data will be displayed
+     */
+    public void setMirror(@Nonnull UUID playerId, @Nonnull Vector3i[] fromPositions,
+                          @Nonnull Vector3i[] toPositions) {
         Objects.requireNonNull(playerId, "Player ID cannot be null");
         Objects.requireNonNull(fromPositions, "From positions cannot be null");
         Objects.requireNonNull(toPositions, "To positions cannot be null");
 
-        ClientsideVisualizationHandler.VectorSet set = ClientsideVisualizationHandler.VectorSet.fakeDoors(fromPositions, toPositions);
-        clearAndRegisterVectorSet(playerId, "default", set);
+        clearAndRegisterVectorSet(playerId, "default",
+                new ClientsideVisualizationHandler.VectorSet.Mirror(fromPositions, toPositions));
     }
 
-    /**
-     * Register a self-referential fake-door set for a player using a bounding box, replacing
-     * all other sets previously registered for that player in this manager.
-     * All positions within the box are expanded and each position's real block data is
-     * re-sent to the client. Stored under the key {@code "default"}.
-     *
-     * @param playerId the target player's UUID
-     * @param min      the minimum corner of the bounding box
-     * @param max      the maximum corner of the bounding box
-     * @throws NullPointerException if any argument is {@code null}
-     */
-    public void setFakeDoors(@Nonnull UUID playerId, @Nonnull Vector3i min, @Nonnull Vector3i max) {
-        Objects.requireNonNull(playerId, "Player ID cannot be null");
-        Objects.requireNonNull(min, "Min position cannot be null");
-        Objects.requireNonNull(max, "Max position cannot be null");
-        
-        Vector3i[] positions = generatePositionsInBoundingBox(min, max);
-        setFakeDoors(playerId, positions);
-    }
-
-    /**
-     * Remove a single visualization set from a player's registered sets.
-     * If the removed set is a {@link ClientsideVisualizationHandler.VectorSetType#FAKE_DOORS}
-     * set, real block data is immediately re-sent to the client to revert the visual change.
-     * If removing this set leaves the player with no remaining sets, the player entry is also
-     * removed from internal storage.
-     *
-     * @param playerId the target player's UUID
-     * @param setId    the identifier of the set to remove
-     * @return the removed {@link ClientsideVisualizationHandler.VectorSet},
-     *         or {@code null} if no set with that ID existed for the player
-     * @throws NullPointerException if any argument is {@code null}
-     */
-    @Nullable
-    public ClientsideVisualizationHandler.VectorSet clear(@Nonnull UUID playerId, @Nonnull String setId) {
-        Objects.requireNonNull(playerId, "Player ID cannot be null");
-        Objects.requireNonNull(setId, "Set ID cannot be null");
-        
-        Map<String, ClientsideVisualizationHandler.VectorSet> sets = playerVectorSets.get(playerId);
-        if (sets == null) {
-            return null;
-        }
-        
-        ClientsideVisualizationHandler.VectorSet removed = sets.remove(setId);
-        revertFakeDoorSet(playerId, removed);
-        if (sets.isEmpty()) {
-            playerVectorSets.remove(playerId);
-        }
-        return removed;
-    }
+    // -------------------------------------------------------------------------
+    // Multi-mode (add*) — leaves existing sets intact
+    // -------------------------------------------------------------------------
 
     /**
      * Add a debug-visual set for a player without disturbing other registered sets.
@@ -242,149 +215,159 @@ public class VisualizationManager {
      *
      * @param playerId  the target player's UUID
      * @param setId     a unique identifier for this set within the manager
-     *                  (e.g. {@code "zone_boundary"}, {@code "pending_blocks"})
      * @param positions block positions to render wireframe cuboids at
      * @param color     RGB color with each component in the range {@code [0.0, 1.0]}
-     * @throws NullPointerException if any argument is {@code null}
      */
-    public void addDebugVisuals(@Nonnull UUID playerId, @Nonnull String setId, 
-                               @Nonnull Vector3i[] positions, @Nonnull Vector3f color) {
+    public void addDebugVisuals(@Nonnull UUID playerId, @Nonnull String setId,
+                                @Nonnull Vector3i[] positions, @Nonnull Vector3f color) {
         Objects.requireNonNull(playerId, "Player ID cannot be null");
         Objects.requireNonNull(setId, "Set ID cannot be null");
         Objects.requireNonNull(positions, "Positions cannot be null");
         Objects.requireNonNull(color, "Color cannot be null");
-        
-        ClientsideVisualizationHandler.VectorSet set = ClientsideVisualizationHandler.VectorSet.debugVisual(positions, color);
-        registerVectorSet(playerId, setId, set);
+
+        registerVectorSet(playerId, setId,
+                new ClientsideVisualizationHandler.VectorSet.DebugVisual(positions, color));
     }
 
     /**
      * Add a debug-visual set for a player using a bounding box, without disturbing other
-     * registered sets. All positions within the box (inclusive) are expanded before storage.
-     * If a set with the same {@code setId} already exists for this player it is replaced.
+     * registered sets. If a set with the same {@code setId} already exists it is replaced.
      *
      * @param playerId the target player's UUID
      * @param setId    a unique identifier for this set within the manager
-     * @param min      the minimum corner of the bounding box
-     * @param max      the maximum corner of the bounding box
+     * @param min      one corner of the bounding box
+     * @param max      the opposite corner of the bounding box
      * @param color    RGB color with each component in the range {@code [0.0, 1.0]}
-     * @throws NullPointerException if any argument is {@code null}
      */
-    public void addDebugVisuals(@Nonnull UUID playerId, @Nonnull String setId, 
-                               @Nonnull Vector3i min, @Nonnull Vector3i max, @Nonnull Vector3f color) {
+    public void addDebugVisuals(@Nonnull UUID playerId, @Nonnull String setId,
+                                @Nonnull Vector3i min, @Nonnull Vector3i max, @Nonnull Vector3f color) {
         Objects.requireNonNull(playerId, "Player ID cannot be null");
         Objects.requireNonNull(setId, "Set ID cannot be null");
         Objects.requireNonNull(min, "Min position cannot be null");
         Objects.requireNonNull(max, "Max position cannot be null");
         Objects.requireNonNull(color, "Color cannot be null");
-        
-        Vector3i[] positions = generatePositionsInBoundingBox(min, max);
-        addDebugVisuals(playerId, setId, positions, color);
+
+        addDebugVisuals(playerId, setId, expandBoundingBox(min, max), color);
     }
 
     /**
-     * Add a self-referential fake-door set for a player without disturbing other registered sets.
-     * Each position's own real world block data will be re-sent to the client on each ticker cycle.
-     * If a set with the same {@code setId} already exists for this player it is replaced.
+     * Add a replace set for a player without disturbing other registered sets.
+     * If a set with the same {@code setId} already exists it is replaced.
      *
      * @param playerId  the target player's UUID
      * @param setId     a unique identifier for this set within the manager
-     * @param positions block positions whose real block state will be re-sent to the client
-     * @throws NullPointerException if any argument is {@code null}
+     * @param positions positions that will display the replacement block
+     * @param blockId   the block ID to send to every position
+     * @param rotation  rotation byte to apply (use {@code 0} for no rotation)
      */
-    public void addFakeDoors(@Nonnull UUID playerId, @Nonnull String setId, @Nonnull Vector3i[] positions) {
+    public void addReplace(@Nonnull UUID playerId, @Nonnull String setId,
+                           @Nonnull Vector3i[] positions, int blockId, byte rotation) {
         Objects.requireNonNull(playerId, "Player ID cannot be null");
         Objects.requireNonNull(setId, "Set ID cannot be null");
         Objects.requireNonNull(positions, "Positions cannot be null");
 
-        addFakeDoors(playerId, setId, positions, positions);
+        registerVectorSet(playerId, setId,
+                new ClientsideVisualizationHandler.VectorSet.Replace(positions, blockId, rotation));
     }
 
     /**
-     * Add a fake-door set for a player without disturbing other registered sets.
-     * For each index {@code i}, the block at {@code toPositions[i]} will be sent to the
-     * client at {@code fromPositions[i]}. If a set with the same {@code setId} already
-     * exists for this player it is replaced.
+     * Add a replace set (with no rotation) for a player without disturbing other registered sets.
+     * If a set with the same {@code setId} already exists it is replaced.
+     *
+     * @param playerId  the target player's UUID
+     * @param setId     a unique identifier for this set within the manager
+     * @param positions positions that will display the replacement block
+     * @param blockId   the block ID to send to every position
+     */
+    public void addReplace(@Nonnull UUID playerId, @Nonnull String setId,
+                           @Nonnull Vector3i[] positions, int blockId) {
+        addReplace(playerId, setId, positions, blockId, (byte) 0);
+    }
+
+    /** Legacy Support */
+    public void addFakeDoors(@Nonnull UUID playerId, @Nonnull String setId, @Nonnull Vector3i[] positions) {
+        addReplace(playerId, setId, positions, 0, (byte) 0);
+    }
+
+    /** Legacy Support */
+    public void addFakeDoors(@Nonnull UUID playerId, @Nonnull String setId, @Nonnull Vector3i min, @Nonnull Vector3i max) {
+        addReplace(playerId, setId, expandBoundingBox(min, max), 0, (byte) 0);
+    }
+
+
+    /**
+     * Add a mirror set for a player without disturbing other registered sets.
+     * If a set with the same {@code setId} already exists it is replaced.
      *
      * @param playerId      the target player's UUID
      * @param setId         a unique identifier for this set within the manager
-     * @param fromPositions client-side positions where fake blocks will appear
-     * @param toPositions   world positions whose block data will be read; should have the
-     *                      same length as {@code fromPositions}
-     * @throws NullPointerException if any argument is {@code null}
+     * @param fromPositions world positions whose block data will be read
+     * @param toPositions   client-side positions where that block data will be displayed
      */
-    public void addFakeDoors(@Nonnull UUID playerId, @Nonnull String setId,
-                             @Nonnull Vector3i[] fromPositions, @Nonnull Vector3i[] toPositions) {
+    public void addMirror(@Nonnull UUID playerId, @Nonnull String setId,
+                          @Nonnull Vector3i[] fromPositions, @Nonnull Vector3i[] toPositions) {
         Objects.requireNonNull(playerId, "Player ID cannot be null");
         Objects.requireNonNull(setId, "Set ID cannot be null");
         Objects.requireNonNull(fromPositions, "From positions cannot be null");
         Objects.requireNonNull(toPositions, "To positions cannot be null");
 
-        ClientsideVisualizationHandler.VectorSet set = ClientsideVisualizationHandler.VectorSet.fakeDoors(fromPositions, toPositions);
-        registerVectorSet(playerId, setId, set);
+        registerVectorSet(playerId, setId,
+                new ClientsideVisualizationHandler.VectorSet.Mirror(fromPositions, toPositions));
     }
 
-    /**
-     * Add a self-referential fake-door set for a player using a bounding box, without
-     * disturbing other registered sets. All positions within the box are expanded before
-     * storage. If a set with the same {@code setId} already exists for this player it is replaced.
-     *
-     * @param playerId the target player's UUID
-     * @param setId    a unique identifier for this set within the manager
-     * @param min      the minimum corner of the bounding box
-     * @param max      the maximum corner of the bounding box
-     * @throws NullPointerException if any argument is {@code null}
-     */
-    public void addFakeDoors(@Nonnull UUID playerId, @Nonnull String setId, @Nonnull Vector3i min, @Nonnull Vector3i max) {
-        Objects.requireNonNull(playerId, "Player ID cannot be null");
-        Objects.requireNonNull(setId, "Set ID cannot be null");
-        Objects.requireNonNull(min, "Min position cannot be null");
-        Objects.requireNonNull(max, "Max position cannot be null");
-        
-        Vector3i[] positions = generatePositionsInBoundingBox(min, max);
-        addFakeDoors(playerId, setId, positions);
-    }
-
-    /**
-     * Return a snapshot of all visualization sets currently registered for a player.
-     * Returns a defensive copy; mutations to the returned map do not affect internal state.
-     * Called by {@link ClientsideVisualizerService} on each ticker cycle.
-     *
-     * @param playerId the target player's UUID
-     * @return a mutable copy of the set-ID-to-{@link ClientsideVisualizationHandler.VectorSet}
-     *         map, or an empty map if the player has no registered sets
-     * @throws NullPointerException if {@code playerId} is {@code null}
-     */
-    @Nonnull
-    Map<String, ClientsideVisualizationHandler.VectorSet> getAll(@Nonnull UUID playerId) {
-        Objects.requireNonNull(playerId, "Player ID cannot be null");
-        
-        Map<String, ClientsideVisualizationHandler.VectorSet> sets = playerVectorSets.get(playerId);
-        return sets != null ? new HashMap<>(sets) : new HashMap<>();
-    }
+    // -------------------------------------------------------------------------
+    // Removal
+    // -------------------------------------------------------------------------
 
     /**
      * Remove all visualization sets for a player from this manager.
-     * Any {@link ClientsideVisualizationHandler.VectorSetType#FAKE_DOORS} sets are reverted
+     * Any {@link ClientsideVisualizationHandler.VectorSet.Replace} or
+     * {@link ClientsideVisualizationHandler.VectorSet.Mirror} sets are reverted
      * by re-sending real block data to the client before removal.
      *
      * @param playerId the target player's UUID
-     * @throws NullPointerException if {@code playerId} is {@code null}
      */
     public void clear(@Nonnull UUID playerId) {
         Objects.requireNonNull(playerId, "Player ID cannot be null");
-        Map<String, ClientsideVisualizationHandler.VectorSet> removedSets = playerVectorSets.remove(playerId);
-        revertFakeDoorSets(playerId, removedSets);
+        Map<String, ClientsideVisualizationHandler.VectorSet> removed = playerVectorSets.remove(playerId);
+        revertBlockSets(playerId, removed);
     }
 
     /**
-     * Remove a specific visualization set across all players registered in this manager.
-     * If the removed set is a {@link ClientsideVisualizationHandler.VectorSetType#FAKE_DOORS}
-     * set, real block data is immediately re-sent to each affected client to revert the visual
-     * change. Players who have no set under {@code setId} are silently skipped.
+     * Remove a single visualization set from a player's registered sets.
+     * If the removed set modifies client blocks ({@code Replace} or {@code Mirror}),
+     * real block data is immediately re-sent to revert the visual change.
+     * If removing this set leaves the player with no remaining sets, the player entry
+     * is also removed from internal storage.
+     *
+     * @param playerId the target player's UUID
+     * @param setId    the identifier of the set to remove
+     * @return the removed set, or {@code null} if no set with that ID existed
+     */
+    @Nullable
+    public ClientsideVisualizationHandler.VectorSet clear(@Nonnull UUID playerId, @Nonnull String setId) {
+        Objects.requireNonNull(playerId, "Player ID cannot be null");
+        Objects.requireNonNull(setId, "Set ID cannot be null");
+
+        Map<String, ClientsideVisualizationHandler.VectorSet> sets = playerVectorSets.get(playerId);
+        if (sets == null) {
+            return null;
+        }
+
+        ClientsideVisualizationHandler.VectorSet removed = sets.remove(setId);
+        revertBlockSet(playerId, removed);
+        if (sets.isEmpty()) {
+            playerVectorSets.remove(playerId);
+        }
+        return removed;
+    }
+
+    /**
+     * Remove a specific set ID across all players registered in this manager.
+     * Block-modifying sets are reverted for each affected player.
+     * Players with no set under {@code setId} are silently skipped.
      *
      * @param setId the identifier of the set to remove from every player
-     * @throws NullPointerException if {@code setId} is {@code null}
      */
     public void clearAll(@Nonnull String setId) {
         Objects.requireNonNull(setId, "Set ID cannot be null");
@@ -394,30 +377,28 @@ public class VisualizationManager {
             if (sets == null) {
                 continue;
             }
-
             ClientsideVisualizationHandler.VectorSet removed = sets.remove(setId);
-            revertFakeDoorSet(playerId, removed);
+            revertBlockSet(playerId, removed);
             if (sets.isEmpty()) {
                 playerVectorSets.remove(playerId);
             }
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Lifecycle (called by the ticker service)
+    // -------------------------------------------------------------------------
 
     /**
      * Force an immediate render of all sets currently registered for a player.
-     * Batches all debug visuals and dispatches all fake-door sets in a single
-     * {@link ClientsideVisualizationHandler#applyVectorSets} call.
      * Returns silently if the player has no registered sets or their {@link PlayerRef}
-     * is no longer valid.
-     * Called internally; prefer relying on the ticker for routine persistence.
+     * is no longer valid. Prefer relying on the ticker for routine persistence.
      *
      * @param playerId the target player's UUID
-     * @throws NullPointerException if {@code playerId} is {@code null}
      */
     void enable(@Nonnull UUID playerId) {
         Objects.requireNonNull(playerId, "Player ID cannot be null");
-        
+
         Map<String, ClientsideVisualizationHandler.VectorSet> sets = playerVectorSets.get(playerId);
         if (sets == null || sets.isEmpty()) {
             return;
@@ -428,17 +409,15 @@ public class VisualizationManager {
             return;
         }
 
-        // Batch all vector sets together for efficient rendering
         ClientsideVisualizationHandler.applyVectorSets(playerRef, playerId, sets.values());
     }
 
     /**
-     * Remove all visualization sets for a player, reverting any fake doors.
+     * Remove all visualization sets for a player and revert any block-modifying sets.
      * Equivalent to {@link #clear(UUID)}; provided as a named counterpart to
      * {@link #enable(UUID)} for call-site clarity.
      *
      * @param playerId the target player's UUID
-     * @throws NullPointerException if {@code playerId} is {@code null}
      */
     public void disable(@Nonnull UUID playerId) {
         Objects.requireNonNull(playerId, "Player ID cannot be null");
@@ -446,10 +425,25 @@ public class VisualizationManager {
     }
 
     /**
-     * Return the UUIDs of all players that currently have at least one set registered
-     * in this manager. Returns a snapshot; the set may change concurrently.
-     * Called by {@link ClientsideVisualizerService} to determine which players need
-     * a ticker update.
+     * Return a snapshot of all visualization sets currently registered for a player.
+     * Returns a defensive copy; mutations to the returned map do not affect internal state.
+     * Called by {@link ClientsideVisualizerService} on each ticker cycle.
+     *
+     * @param playerId the target player's UUID
+     * @return a mutable copy of the set-ID → VectorSet map, or an empty map if the player
+     *         has no registered sets
+     */
+    @Nonnull
+    Map<String, ClientsideVisualizationHandler.VectorSet> getAll(@Nonnull UUID playerId) {
+        Objects.requireNonNull(playerId, "Player ID cannot be null");
+        Map<String, ClientsideVisualizationHandler.VectorSet> sets = playerVectorSets.get(playerId);
+        return sets != null ? new HashMap<>(sets) : new HashMap<>();
+    }
+
+    /**
+     * Return the UUIDs of all players that currently have at least one set registered.
+     * Returns a snapshot; the set may change concurrently.
+     * Called by {@link ClientsideVisualizerService} to determine which players need a tick.
      *
      * @return a mutable snapshot of the player UUID set; never {@code null}
      */
@@ -458,132 +452,98 @@ public class VisualizationManager {
         return new HashSet<>(playerVectorSets.keySet());
     }
 
+    // -------------------------------------------------------------------------
+    // Private helpers
+    // -------------------------------------------------------------------------
+
     /**
      * Store a {@link ClientsideVisualizationHandler.VectorSet} under the given key for a player.
      * Creates the inner map lazily if this is the first set registered for the player.
-     * If a set with the same {@code setId} already exists it is silently replaced.
-     *
-     * @param playerId  the target player's UUID
-     * @param setId     the key under which to store the set
-     * @param vectorSet the set to store
+     * Silently replaces any existing set with the same {@code setId}.
      */
-    private void registerVectorSet(@Nonnull UUID playerId, @Nonnull String setId, 
+    private void registerVectorSet(@Nonnull UUID playerId, @Nonnull String setId,
                                    @Nonnull ClientsideVisualizationHandler.VectorSet vectorSet) {
-        Objects.requireNonNull(playerId, "Player ID cannot be null");
-        Objects.requireNonNull(setId, "Set ID cannot be null");
-        Objects.requireNonNull(vectorSet, "Vector set cannot be null");
-        
         playerVectorSets.computeIfAbsent(playerId, k -> new ConcurrentHashMap<>()).put(setId, vectorSet);
     }
 
     /**
-     * Clear all existing sets for a player and then register a single new one.
-     * Fake-door reversion is triggered by the {@link #clear(UUID)} call before the new
-     * set is stored, so the client sees real blocks briefly before the new set is applied
-     * on the next ticker cycle.
-     *
-     * @param playerId  the target player's UUID
-     * @param setId     the key under which to store the new set
-     * @param vectorSet the new set to register
+     * Clear all existing sets for a player and register a single new one.
+     * Block-modifying sets are reverted before the new set is stored.
      */
-    private void clearAndRegisterVectorSet(@Nonnull UUID playerId, @Nonnull String setId, 
+    private void clearAndRegisterVectorSet(@Nonnull UUID playerId, @Nonnull String setId,
                                            @Nonnull ClientsideVisualizationHandler.VectorSet vectorSet) {
-        Objects.requireNonNull(playerId, "Player ID cannot be null");
-        Objects.requireNonNull(setId, "Set ID cannot be null");
-        Objects.requireNonNull(vectorSet, "Vector set cannot be null");
-        
         clear(playerId);
         registerVectorSet(playerId, setId, vectorSet);
     }
 
     /**
-     * Revert all {@link ClientsideVisualizationHandler.VectorSetType#FAKE_DOORS} sets in the
-     * given map by re-sending real block data to the player's client.
-     * Non-fake-door sets and {@code null} entries in the map are silently skipped.
-     * Returns immediately if {@code sets} is {@code null} or empty, or if the player's
-     * {@link PlayerRef} is no longer valid.
-     *
-     * @param playerId the target player's UUID
-     * @param sets     the sets to revert, typically the map removed from internal storage;
-     *                 may be {@code null}
+     * Revert all block-modifying sets ({@code Replace} and {@code Mirror}) in the given map
+     * by re-sending real block data to the player's client.
+     * {@code null} entries and {@code DebugVisual} sets are silently skipped.
+     * Returns immediately if {@code sets} is {@code null} or empty, or if the player ref is invalid.
      */
-    private void revertFakeDoorSets(@Nonnull UUID playerId,
-                                    @Nullable Map<String, ClientsideVisualizationHandler.VectorSet> sets) {
-        Objects.requireNonNull(playerId, "Player ID cannot be null");
+    private void revertBlockSets(@Nonnull UUID playerId,
+                                 @Nullable Map<String, ClientsideVisualizationHandler.VectorSet> sets) {
         if (sets == null || sets.isEmpty()) {
             return;
         }
-
         PlayerRef playerRef = Universe.get().getPlayer(playerId);
         if (playerRef == null || !playerRef.isValid()) {
             return;
         }
-
         for (ClientsideVisualizationHandler.VectorSet set : sets.values()) {
-            if (set != null && set.getType() == ClientsideVisualizationHandler.VectorSetType.FAKE_DOORS) {
-                ClientsideVisualizationHandler.revertFakeDoors(playerRef, set.getPositions());
-            }
+            revertBlockSet(playerRef, set);
         }
     }
 
     /**
-     * Revert a single {@link ClientsideVisualizationHandler.VectorSetType#FAKE_DOORS} set by
-     * re-sending real block data to the player's client.
-     * Returns immediately if {@code set} is {@code null}, is not a fake-door set, or the
-     * player's {@link PlayerRef} is no longer valid.
-     *
-     * @param playerId the target player's UUID
-     * @param set      the set to revert; may be {@code null}
+     * Revert a single block-modifying set by re-sending real block data to the player's client.
+     * Returns immediately if {@code set} is {@code null}, is a {@code DebugVisual}, or the
+     * player ref is invalid.
      */
-    private void revertFakeDoorSet(@Nonnull UUID playerId,
-                                   @Nullable ClientsideVisualizationHandler.VectorSet set) {
-        Objects.requireNonNull(playerId, "Player ID cannot be null");
-        if (set == null || set.getType() != ClientsideVisualizationHandler.VectorSetType.FAKE_DOORS) {
+    private void revertBlockSet(@Nonnull UUID playerId,
+                                @Nullable ClientsideVisualizationHandler.VectorSet set) {
+        if (set == null) {
             return;
         }
-
         PlayerRef playerRef = Universe.get().getPlayer(playerId);
         if (playerRef == null || !playerRef.isValid()) {
             return;
         }
-
-        ClientsideVisualizationHandler.revertFakeDoors(playerRef, set.getPositions());
+        revertBlockSet(playerRef, set);
     }
 
     /**
-     * Generate every block position contained within an axis-aligned bounding box, inclusive
-     * on all faces. Min and max components are normalized before iteration so the caller does
-     * not need to guarantee that {@code min.x ≤ max.x} etc.
+     * Revert a single block-modifying set using an already-resolved {@link PlayerRef}.
+     * {@code DebugVisual} sets are silently ignored.
+     */
+    private void revertBlockSet(@Nonnull PlayerRef playerRef,
+                                @Nullable ClientsideVisualizationHandler.VectorSet set) {
+        switch (set) {
+            case ClientsideVisualizationHandler.VectorSet.Replace r ->
+                    ClientsideVisualizationHandler.revertPositions(playerRef, r.positions());
+            case ClientsideVisualizationHandler.VectorSet.Mirror m ->
+                    ClientsideVisualizationHandler.revertPositions(playerRef, m.toPositions());
+            default -> { /* DebugVisual — nothing to revert */ }
+        }
+    }
+
+    /**
+     * Generate every block position within an axis-aligned bounding box, inclusive on all faces.
+     * Min and max components are normalized so the caller does not need to guarantee ordering.
      * Positions are enumerated in X → Y → Z order.
      *
      * @param min one corner of the bounding box
      * @param max the opposite corner of the bounding box
-     * @return array of {@code (maxX-minX+1) * (maxY-minY+1) * (maxZ-minZ+1)} positions;
-     *         never {@code null}, never empty (a single-block box produces one entry)
-     * @throws NullPointerException if either argument is {@code null}
+     * @return array of {@code (dx+1)*(dy+1)*(dz+1)} positions; never {@code null} or empty
      */
-    private Vector3i[] generatePositionsInBoundingBox(@Nonnull Vector3i min, @Nonnull Vector3i max) {
-        Objects.requireNonNull(min, "Min position cannot be null");
-        Objects.requireNonNull(max, "Max position cannot be null");
-        
-        // Normalize min and max to ensure they are in the correct order
-        int minX = Math.min(min.x, max.x);
-        int maxX = Math.max(min.x, max.x);
-        int minY = Math.min(min.y, max.y);
-        int maxY = Math.max(min.y, max.y);
-        int minZ = Math.min(min.z, max.z);
-        int maxZ = Math.max(min.z, max.z);
-        
-        // Calculate the number of positions
-        int width = maxX - minX + 1;
-        int height = maxY - minY + 1;
-        int depth = maxZ - minZ + 1;
-        int totalPositions = width * height * depth;
-        
-        Vector3i[] positions = new Vector3i[totalPositions];
+    private Vector3i[] expandBoundingBox(@Nonnull Vector3i min, @Nonnull Vector3i max) {
+        int minX = Math.min(min.x, max.x), maxX = Math.max(min.x, max.x);
+        int minY = Math.min(min.y, max.y), maxY = Math.max(min.y, max.y);
+        int minZ = Math.min(min.z, max.z), maxZ = Math.max(min.z, max.z);
+
+        Vector3i[] positions = new Vector3i[(maxX - minX + 1) * (maxY - minY + 1) * (maxZ - minZ + 1)];
         int index = 0;
-        
-        // Generate all positions within the bounding box
         for (int x = minX; x <= maxX; x++) {
             for (int y = minY; y <= maxY; y++) {
                 for (int z = minZ; z <= maxZ; z++) {
@@ -591,7 +551,6 @@ public class VisualizationManager {
                 }
             }
         }
-        
         return positions;
     }
 }

@@ -4,7 +4,6 @@ import com.hypixel.hytale.math.util.ChunkUtil;
 import com.hypixel.hytale.math.vector.Vector3i;
 import com.hypixel.hytale.protocol.Vector3f;
 import com.hypixel.hytale.protocol.packets.world.ServerSetBlock;
-import com.hypixel.hytale.server.core.asset.type.blocktype.config.BlockType;
 import com.hypixel.hytale.server.core.universe.PlayerRef;
 import com.hypixel.hytale.server.core.universe.Universe;
 import com.hypixel.hytale.server.core.universe.world.World;
@@ -35,145 +34,93 @@ import java.util.logging.Level;
  * <h2>Thread safety</h2>
  * {@link #initialize()}, {@link #shutdown()}, {@link #registerManager}, and
  * {@link #unregisterManager} are {@code synchronized} on the class and safe to call from any
- * thread. Internal helpers ({@link #applyVectorSets}, {@link #revertFakeDoors}) are called from
+ * thread. Internal helpers ({@link #applyVectorSets}, {@link #revertPositions}) are called from
  * the ticker thread owned by {@link ClientsideVisualizerService}.
  */
 public final class ClientsideVisualizationHandler {
 
-    public static final Vector3f GREEN = new Vector3f(0.0F, 1.0F, 0.0F);
+    public static final Vector3f GREEN  = new Vector3f(0.0F, 1.0F, 0.0F);
     public static final Vector3f ORANGE = new Vector3f(1.0F, 0.5F, 0.0F);
-    public static final Vector3f RED = new Vector3f(1.0F, 0.0F, 0.0F);
+    public static final Vector3f RED    = new Vector3f(1.0F, 0.0F, 0.0F);
 
     @Nullable
     private static volatile ClientsideVisualizerService visualizerService;
 
+    // -------------------------------------------------------------------------
+    // VectorSet — sealed interface, one record per variant
+    // -------------------------------------------------------------------------
+
     /**
-     * Represents a set of block positions with associated rendering metadata.
-     * A {@code VectorSet} is either a debug visual (colored wireframe cuboids) or a fake-door
-     * (client-side block replacement). Use the static factory methods to construct instances.
+     * A set of block positions paired with the metadata needed to render or apply them.
+     * Each variant carries exactly the data it requires — no nullable sentinel fields.
      *
-     * @see VectorSet#debugVisual
-     * @see VectorSet#fakeDoors
+     * <ul>
+     *   <li>{@link DebugVisual} — colored wireframe cuboids</li>
+     *   <li>{@link Replace}     — stamp a fixed block ID onto every position</li>
+     *   <li>{@link Mirror}      — copy real block data from source positions to target positions</li>
+     * </ul>
      */
-    public static final class VectorSet {
-        /**
-         * The positions at which this set will be rendered or to which fake blocks will be sent.
-         */
-        @Nonnull
-        private final Vector3i[] positions;
+    public sealed interface VectorSet permits VectorSet.DebugVisual, VectorSet.Replace, VectorSet.Mirror {
+
+        /** Primary positions that this set operates on. Never {@code null}. */
+        @Nonnull Vector3i[] getPositions();
 
         /**
-         * For {@link VectorSetType#FAKE_DOORS}: the world positions to read actual block data from.
-         * {@code null} for {@link VectorSetType#DEBUG_VISUAL}.
-         */
-        @Nullable
-        private final Vector3i[] destinationPositions;
-        /**
-         * For {@link VectorSetType#DEBUG_VISUAL}: the RGB wireframe color.
-         * {@code null} for {@link VectorSetType#FAKE_DOORS}.
-         */
-        @Nullable
-        private final Vector3f debugColor;
-        @Nonnull
-        private final VectorSetType type;
-
-        private VectorSet(@Nonnull Vector3i[] positions, @Nullable Vector3i[] destinationPositions, 
-                         @Nullable Vector3f debugColor, @Nonnull VectorSetType type) {
-            this.positions = positions;
-            this.destinationPositions = destinationPositions;
-            this.debugColor = debugColor;
-            this.type = type;
-        }
-
-        /**
-         * Return the positions at which this set will be rendered or to which fake blocks will be sent.
-         *
-         * @return array of block positions; never {@code null}
-         */
-        @Nonnull
-        public Vector3i[] getPositions() {
-            return positions;
-        }
-
-        /**
-         * Return the source positions used to read real block data for fake-door sets.
-         * For each index {@code i}, the block found at {@code destinationPositions[i]} is sent
-         * to the client at {@code positions[i]}.
-         *
-         * @return array of source positions, or {@code null} for {@link VectorSetType#DEBUG_VISUAL}
-         */
-        @Nullable
-        public Vector3i[] getDestinationPositions() {
-            return destinationPositions;
-        }
-
-        /**
-         * Return the wireframe color used when rendering this set as debug cuboids.
-         * Each component is in the range {@code [0.0, 1.0]}.
-         *
-         * @return the RGB color, or {@code null} for {@link VectorSetType#FAKE_DOORS}
-         */
-        @Nullable
-        public Vector3f getDebugColor() {
-            return debugColor;
-        }
-
-        /**
-         * Return the type of this vector set.
-         *
-         * @return the {@link VectorSetType}; never {@code null}
-         */
-        @Nonnull
-        public VectorSetType getType() {
-            return type;
-        }
-
-        /**
-         * Create a {@link VectorSetType#DEBUG_VISUAL} set that renders colored wireframe cuboids
-         * at the given positions. Adjacent positions are automatically merged into larger AABBs
-         * by the rendering pipeline.
+         * Renders colored wireframe cuboids at {@code positions}.
+         * Adjacent positions are automatically merged into larger AABBs by the rendering pipeline.
          *
          * @param positions block positions to visualize
-         * @param color     RGB color with each component in the range {@code [0.0, 1.0]}
-         * @return a new debug-visual {@code VectorSet}
+         * @param color     RGB color with each component in {@code [0.0, 1.0]}
          */
-        @Nonnull
-        public static VectorSet debugVisual(@Nonnull Vector3i[] positions, @Nonnull Vector3f color) {
-            return new VectorSet(positions, null, color, VectorSetType.DEBUG_VISUAL);
+        record DebugVisual(
+                @Nonnull Vector3i[] positions,
+                @Nonnull Vector3f color
+        ) implements VectorSet {
+            @Override
+            public Vector3i[] getPositions() { return positions; }
         }
 
         /**
-         * Create a {@link VectorSetType#FAKE_DOORS} set that sends client-side block packets,
-         * making each position in {@code fromPositions} display the block found at the
-         * corresponding position in {@code toPositions}. The two arrays must have equal length;
-         * entries are matched by index.
+         * Stamps a single block ID (with optional rotation) onto every position in
+         * {@code positions}. No world chunk read is performed; filler is always {@code 0}.
          *
-         * @param fromPositions positions on the client where fake blocks will appear
-         * @param toPositions   world positions whose block data (id, filler, rotation) will be read
-         * @return a new fake-door {@code VectorSet}
+         * @param positions block positions that will display the replacement block
+         * @param blockId   the block ID to send to every position
+         * @param rotation  rotation byte applied to every packet (use {@code 0} for no rotation)
          */
-        @Nonnull
-        public static VectorSet fakeDoors(@Nonnull Vector3i[] fromPositions, @Nonnull Vector3i[] toPositions) {
-            return new VectorSet(fromPositions, toPositions, null, VectorSetType.FAKE_DOORS);
+        record Replace(
+                @Nonnull Vector3i[] positions,
+                int blockId,
+                byte rotation
+        ) implements VectorSet {
+            @Override
+            public Vector3i[] getPositions() { return positions; }
+        }
+
+        /**
+         * Copies real block data from each position in {@code fromPositions} to the corresponding
+         * position in {@code toPositions}. Arrays are matched by index; lengths should be equal.
+         *
+         * @param fromPositions world positions whose block data (id, filler, rotation) will be read
+         * @param toPositions   client-side positions where that block data will be displayed
+         */
+        record Mirror(
+                @Nonnull Vector3i[] fromPositions,
+                @Nonnull Vector3i[] toPositions
+        ) implements VectorSet {
+            @Override
+            public Vector3i[] getPositions() { return fromPositions; }
         }
     }
 
-    /**
-     * Discriminates the rendering strategy used by a {@link VectorSet}.
-     */
-    public enum VectorSetType {
-        /** Renders colored wireframe cuboids at the registered positions. */
-        DEBUG_VISUAL,
-        /** Sends client-side {@link ServerSetBlock} packets to replace blocks visually. */
-        FAKE_DOORS
-    }
+    // -------------------------------------------------------------------------
+    // Lifecycle
+    // -------------------------------------------------------------------------
 
-    private ClientsideVisualizationHandler() {
-    }
+    private ClientsideVisualizationHandler() {}
 
     /**
      * Initialize the visualization system and start the background ticker.
-     * Creates the {@link ClientsideVisualizerService} if it has not already been created.
      * Safe to call multiple times; subsequent calls are no-ops.
      */
     public static synchronized void initialize() {
@@ -187,8 +134,6 @@ public final class ClientsideVisualizationHandler {
     /**
      * Shut down the visualization system.
      * Stops the background ticker, clears all registered managers, and releases all resources.
-     * After this call, {@link #registerManager} and visualization rendering are no-ops until
-     * {@link #initialize()} is called again.
      */
     public static synchronized void shutdown() {
         if (visualizerService != null) {
@@ -200,10 +145,7 @@ public final class ClientsideVisualizationHandler {
 
     /**
      * Register a {@link VisualizationManager} for automatic ticker-driven refresh.
-     * Once registered, all visualizations in the manager will be periodically re-sent to
-     * each player without requiring explicit calls from the owning system.
-     *
-     * <p>Logs a warning and returns without registering if the system has not been initialized.
+     * Logs a warning and returns without registering if the system has not been initialized.
      *
      * @param manager the manager to register
      */
@@ -218,8 +160,8 @@ public final class ClientsideVisualizationHandler {
 
     /**
      * Unregister a {@link VisualizationManager} from automatic ticker-driven refresh.
-     * This is optional; all managers are cleared automatically on {@link #shutdown()}.
-     * Call this only if you need to stop a system's visualizations before plugin shutdown.
+     * All managers are cleared automatically on {@link #shutdown()}; call this only if you need
+     * to stop a system's visualizations before plugin shutdown.
      *
      * @param manager the manager to unregister
      */
@@ -230,32 +172,30 @@ public final class ClientsideVisualizationHandler {
         }
     }
 
+    // -------------------------------------------------------------------------
+    // Internal helpers
+    // -------------------------------------------------------------------------
+
     /**
-     * Revert fake-door visualizations for a player by re-sending each position's real block data.
-     * Equivalent to calling {@link #sendFakeDoors} with identical from- and to-position arrays,
-     * which causes the client to overwrite each fake block with the actual world block.
+     * Revert client-side block changes at {@code positions} by re-sending the real world block
+     * at each position. Returns immediately if {@code positions} is empty or the player is invalid.
      *
      * <p>Called internally by {@link VisualizationManager} during clear and disable flows.
-     * Returns immediately if {@code positions} is empty or the player ref is invalid.
      *
      * @param playerRef the player whose fake blocks should be reverted
      * @param positions the positions to revert
      */
-    static void revertFakeDoors(@Nonnull PlayerRef playerRef, @Nonnull Vector3i[] positions) {
-        if (positions.length == 0) {
+    static void revertPositions(@Nonnull PlayerRef playerRef, @Nonnull Vector3i[] positions) {
+        if (positions.length == 0 || !playerRef.isValid()) {
             return;
         }
-        if (playerRef == null || !playerRef.isValid()) {
-            return;
-        }
-        sendFakeDoors(playerRef, positions, positions);
+        sendMirror(playerRef, positions, positions);
     }
 
     /**
      * Apply a collection of {@link VectorSet}s to a player in a batched manner.
-     * Debug visuals with the same color are merged into a single render call to minimize
-     * {@link com.hypixel.hytale.protocol.packets.player.DisplayDebug} packet volume.
-     * Fake-door sets are dispatched individually via {@link #sendFakeDoors}.
+     * {@link VectorSet.DebugVisual}s with the same color are merged into a single render call.
+     * {@link VectorSet.Replace} and {@link VectorSet.Mirror} sets are dispatched individually.
      *
      * <p>Returns immediately if the visualization service has not been initialized.
      * Called internally by {@link ClientsideVisualizerService} on each ticker cycle.
@@ -264,40 +204,34 @@ public final class ClientsideVisualizationHandler {
      * @param playerId  the player's UUID, forwarded to the visualizer service for throttle/cache keying
      * @param sets      the vector sets to apply
      */
-    static void applyVectorSets(@Nonnull PlayerRef playerRef, @Nonnull UUID playerId, 
+    static void applyVectorSets(@Nonnull PlayerRef playerRef, @Nonnull UUID playerId,
                                 @Nonnull Iterable<VectorSet> sets) {
         ClientsideVisualizerService service = visualizerService;
         if (service == null) {
             return;
         }
 
-        // Group debug visuals by color for batched rendering
         Map<Vector3f, List<Vector3i>> debugVisualsByColor = new HashMap<>();
-        
+
         for (VectorSet set : sets) {
-            Vector3i[] positions = set.getPositions();
-            if (positions.length == 0) {
+            if (set.getPositions().length == 0) {
                 continue;
             }
 
-            switch (set.getType()) {
-                case DEBUG_VISUAL -> {
-                    Vector3f color = set.getDebugColor();
-                    if (color != null) {
-                        debugVisualsByColor.computeIfAbsent(color, k -> new ArrayList<>())
-                            .addAll(Arrays.asList(positions));
-                    }
-                }
-                case FAKE_DOORS -> {
-                    Vector3i[] destinationPositions = set.getDestinationPositions();
-                    if (destinationPositions != null && destinationPositions.length > 0) {
-                        sendFakeDoors(playerRef, positions, destinationPositions);
-                    }
-                }
+            switch (set) {
+                case VectorSet.DebugVisual v ->
+                        debugVisualsByColor
+                                .computeIfAbsent(v.color(), k -> new ArrayList<>())
+                                .addAll(Arrays.asList(v.positions()));
+
+                case VectorSet.Replace r ->
+                        sendReplace(playerRef, r.positions(), r.blockId(), r.rotation());
+
+                case VectorSet.Mirror m ->
+                        sendMirror(playerRef, m.fromPositions(), m.toPositions());
             }
         }
-        
-        // Send batched debug visuals
+
         for (Map.Entry<Vector3f, List<Vector3i>> entry : debugVisualsByColor.entrySet()) {
             List<Vector3i> positions = entry.getValue();
             if (!positions.isEmpty()) {
@@ -307,79 +241,105 @@ public final class ClientsideVisualizationHandler {
     }
 
     /**
+     * Send client-side {@link ServerSetBlock} packets that stamp {@code blockId} (with
+     * {@code rotation}) onto every position in {@code positions}. Filler is always {@code 0}.
+     *
+     * @param playerRef the player to send updates to
+     * @param positions the positions that should display the replacement block
+     * @param blockId   the block ID to send to every position
+     * @param rotation  rotation byte applied to every packet
+     */
+    private static void sendReplace(@Nonnull PlayerRef playerRef, @Nonnull Vector3i[] positions,
+                                    int blockId, byte rotation) {
+        int sentCount   = 0;
+        int failedCount = 0;
+
+        for (Vector3i pos : positions) {
+            if (pos == null) {
+                failedCount++;
+                continue;
+            }
+            ServerSetBlock packet = new ServerSetBlock(pos.x, pos.y, pos.z, blockId, (short) 0, rotation);
+            playerRef.getPacketHandler().writeNoCache(packet);
+            ClientsideVisualsPlugin.LOGGER.at(Level.FINE).log(
+                    "[Visualization] Sent Replace: pos=%s blockId=%d rotation=%d", pos, blockId, rotation);
+            sentCount++;
+        }
+
+        ClientsideVisualsPlugin.LOGGER.at(Level.INFO).log(
+                "[Visualization] sendReplace complete: sent=%d, failed=%d", sentCount, failedCount);
+    }
+
+    /**
      * Send client-side {@link ServerSetBlock} packets that make each position in
-     * {@code fromPositions} display the block found at the corresponding position in
-     * {@code toPositions}. Entries are matched by index; if the arrays differ in length,
+     * {@code toPositions} display the block found at the corresponding position in
+     * {@code fromPositions}. Entries are matched by index; if the arrays differ in length,
      * only {@code min(from, to)} pairs are processed and a warning is logged.
      *
-     * <p>When {@code fromPositions} and {@code toPositions} are the same array (or contain
-     * identical positions), this effectively reverts fake blocks to their real world state.
+     * <p>When {@code fromPositions} and {@code toPositions} are the same array (identical
+     * positions), this effectively reverts fake blocks to their real world state.
      *
-     * @param playerRef      the player to send updates to
-     * @param fromPositions  client-side positions where fake blocks will be displayed
-     * @param toPositions    world positions whose block data (id, filler, rotation) will be read
+     * @param playerRef    the player to send updates to
+     * @param fromPositions world positions whose block data (id, filler, rotation) will be read
+     * @param toPositions   client-side positions where that block data will be displayed
      */
-    private static void sendFakeDoors(@Nonnull PlayerRef playerRef, @Nonnull Vector3i[] fromPositions, 
-                                      @Nonnull Vector3i[] toPositions) {
-        int sentCount = 0;
+    private static void sendMirror(@Nonnull PlayerRef playerRef, @Nonnull Vector3i[] fromPositions,
+                                   @Nonnull Vector3i[] toPositions) {
+        int sentCount   = 0;
         int failedCount = 0;
-        int minLength = Math.min(fromPositions.length, toPositions.length);
-        
-        for (int index = 0; index < minLength; index++) {
-            Vector3i fromPos = fromPositions[index];
-            Vector3i toPos = toPositions[index];
-            
+        int minLength   = Math.min(fromPositions.length, toPositions.length);
+
+        for (int i = 0; i < minLength; i++) {
+            Vector3i fromPos = fromPositions[i];
+            Vector3i toPos   = toPositions[i];
+
             if (fromPos == null || toPos == null) {
                 failedCount++;
                 continue;
             }
-            
-            // Get the block at the destination position and send it to the source position
-            // At index 0 (primary state), we read the block from toPos and place it at fromPos
-            ServerSetBlock packet = readBlockAtPositionAsPacket(toPos, fromPos);
+
+            ServerSetBlock packet = readBlockAtPositionAsPacket(fromPos, toPos);
             if (packet != null) {
                 playerRef.getPacketHandler().writeNoCache(packet);
-                ClientsideVisualsPlugin.LOGGER.at(Level.FINE).log("[Visualization] Sent FakeDoor: from=%s to=%s", fromPos, toPos);
+                ClientsideVisualsPlugin.LOGGER.at(Level.FINE).log(
+                        "[Visualization] Sent Mirror: from=%s to=%s", fromPos, toPos);
                 sentCount++;
             } else {
                 failedCount++;
             }
         }
-        
+
         if (minLength != Math.max(fromPositions.length, toPositions.length)) {
-            ClientsideVisualsPlugin.LOGGER.at(Level.WARNING).log("[Visualization] FakeDoor position count mismatch: from=%d, to=%d",
-                fromPositions.length, toPositions.length);
+            ClientsideVisualsPlugin.LOGGER.at(Level.WARNING).log(
+                    "[Visualization] Mirror position count mismatch: from=%d, to=%d",
+                    fromPositions.length, toPositions.length);
         }
-        
-        if (sentCount > 0 || failedCount > 0) {
-            ClientsideVisualsPlugin.LOGGER.at(Level.INFO).log("[Visualization] sendFakeDoors complete: sent=%d, failed=%d", sentCount, failedCount);
-        }
+
+        ClientsideVisualsPlugin.LOGGER.at(Level.INFO).log(
+                "[Visualization] sendMirror complete: sent=%d, failed=%d", sentCount, failedCount);
     }
 
     /**
-     * Read the block state at {@code sourcePos} from the first loaded world chunk that contains
-     * it, and package that state as a {@link ServerSetBlock} packet targeting {@code destPos}.
-     * The packet carries the block id, filler value, and rotation index of the source block.
+     * Read the block state at {@code fromPos} from the first loaded world chunk that contains it,
+     * and package that state as a {@link ServerSetBlock} packet targeting {@code toPos}.
      *
-     * @param sourcePos the world position to read block data from
-     * @param destPos   the world position the packet will target on the client
-     * @return a ready-to-send packet, or {@code null} if no loaded chunk contains
-     *         {@code sourcePos}
+     * @param fromPos the world position to read block data from
+     * @param toPos   the world position the packet will target on the client
+     * @return a ready-to-send packet, or {@code null} if no loaded chunk contains {@code fromPos}
      */
     @Nullable
-    private static ServerSetBlock readBlockAtPositionAsPacket(@Nonnull Vector3i sourcePos, @Nonnull Vector3i destPos) {
+    private static ServerSetBlock readBlockAtPositionAsPacket(@Nonnull Vector3i fromPos, @Nonnull Vector3i toPos) {
         for (World world : Universe.get().getWorlds().values()) {
-            WorldChunk chunk = world.getChunkIfLoaded(ChunkUtil.indexChunkFromBlock(sourcePos.x, sourcePos.z));
+            WorldChunk chunk = world.getChunkIfLoaded(ChunkUtil.indexChunkFromBlock(fromPos.x, fromPos.z));
             if (chunk == null) {
                 continue;
             }
 
-            int blockId = world.getBlock(sourcePos.x, sourcePos.y, sourcePos.z);
-            short filler = (short) chunk.getFiller(sourcePos.x, sourcePos.y, sourcePos.z);
-            byte rotation = (byte) chunk.getRotationIndex(sourcePos.x, sourcePos.y, sourcePos.z);
-            return new ServerSetBlock(destPos.x, destPos.y, destPos.z, blockId, filler, rotation);
+            int   blockId  = world.getBlock(fromPos.x, fromPos.y, fromPos.z);
+            short filler   = (short) chunk.getFiller(fromPos.x, fromPos.y, fromPos.z);
+            byte  rotation = (byte)  chunk.getRotationIndex(fromPos.x, fromPos.y, fromPos.z);
+            return new ServerSetBlock(toPos.x, toPos.y, toPos.z, blockId, filler, rotation);
         }
-
         return null;
     }
 }
