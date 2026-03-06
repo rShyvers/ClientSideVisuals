@@ -1,10 +1,10 @@
 {
-  "groupId": "com.example",
+  "groupId": "com.landofsharks",
   "artifactId": "clientside-visuals",
   "modName": "ClientsideVisuals",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "buildSystem": "Gradle",
   "language": "Java",
-  "jarPath": "build/libs/clientside-visuals-0.1.0.jar",
+  "jarPath": "build/libs/clientside-visuals-0.1.2.jar",
   "buildTask": "shadowJar"
 }
