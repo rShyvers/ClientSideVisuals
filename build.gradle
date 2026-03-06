@@ -3,8 +3,8 @@ plugins {
     id 'com.gradleup.shadow' version '8.3.0'
 }
 
-group = 'com.example.clientsidevisuals'
-version = '0.1.0'
+group = 'com.landofsharks.clientsidevisuals'
+version = '0.1.1'
 
 repositories {
     mavenLocal()
@@ -23,7 +23,6 @@ repositories {
 dependencies {
     // Hytale Server API from official Maven repository
     compileOnly 'com.hypixel.hytale:Server:2026.02.19-1a311a592'
-    compileOnly 'com.hypixel.hytale:HytaleServer-stripped:1.0-SNAPSHOT'
     // JSR305 annotations (@Nonnull, @Nullable)
     compileOnly 'com.google.code.findbugs:jsr305:3.0.2'
     implementation 'com.google.code.gson:gson:2.10.1'
@@ -50,6 +49,7 @@ tasks.named('jar') {
 
 tasks.named('build') {
     dependsOn shadowJar
+    finalizedBy("linkToServerMods")
 }
 
 // Deploy plugin JAR to server mods folder
@@ -67,5 +67,21 @@ tasks.register('watch') {
     doLast {
         println "Watching for changes... Press Ctrl+C to stop."
         println "Run 'gradle build --continuous' for auto-rebuild on file changes."
+    }
+}
+
+import java.nio.file.Files
+
+tasks.register("linkToServerMods") {
+    dependsOn shadowJar
+
+    doLast {
+        def jarFile = shadowJar.archiveFile.get().asFile
+        def link = file("../Greenhouse/server/mods/clientside-visuals.jar")
+
+        Files.deleteIfExists(link.toPath())
+        Files.createSymbolicLink(link.toPath(), jarFile.toPath())
+
+        println "Symlink created: ${link} -> ${jarFile}"
     }
 }
