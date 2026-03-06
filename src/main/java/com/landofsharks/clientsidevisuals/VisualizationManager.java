@@ -195,13 +195,38 @@ public class VisualizationManager {
         setReplace(playerId, positions, blockId, (byte) 0);
     }
 
-    /** Legacy Support */
+    /**
+     * Legacy support — clears all previously registered sets for the target player and registers
+     * a single Replace set stored under {@code "default"} that sends air (block ID {@code 0}) to
+     * the given positions, effectively hiding every block at those locations.
+     * Equivalent to calling {@link #setReplace(UUID, Vector3i[], int)} with a block ID of {@code 0}.
+     *
+     * @param playerId  the target player's UUID
+     * @param positions positions whose blocks will be hidden from the player
+     * @deprecated Prefer {@link #setReplace(UUID, Vector3i[], int)} with an explicit block ID.
+     */
+    @Deprecated
     @SuppressWarnings("unused")
     public void setFakeDoors(@Nonnull UUID playerId, @Nonnull Vector3i[] positions) {
         setReplace(playerId, positions, 0, (byte) 0);
     }
 
-    /** Legacy Support */
+    /**
+     * Legacy support — clears all previously registered sets for the target player and registers
+     * a single Replace set stored under {@code "default"} that sends air (block ID {@code 0}) to
+     * every position inside the axis-aligned bounding box defined by {@code min} and {@code max},
+     * effectively hiding those blocks for the player.
+     * The bounding box is expanded into a flat {@code Vector3i[]} via
+     * {@link #expandBoundingBox(Vector3i, Vector3i)} before being forwarded to
+     * {@link #setReplace(UUID, Vector3i[], int, byte)}.
+     *
+     * @param playerId the target player's UUID
+     * @param min      the minimum corner (inclusive) of the bounding box
+     * @param max      the maximum corner (inclusive) of the bounding box
+     * @deprecated Prefer {@link #setReplace(UUID, Vector3i[], int)} with an explicit block ID
+     *             and a pre-expanded position array.
+     */
+    @Deprecated
     @SuppressWarnings("unused")
     public void setFakeDoors(@Nonnull UUID playerId, @Nonnull Vector3i min, @Nonnull Vector3i max) {
         setReplace(playerId, expandBoundingBox(min, max), 0, (byte) 0);
@@ -311,13 +336,40 @@ public class VisualizationManager {
         addReplace(playerId, setId, positions, blockId, (byte) 0);
     }
 
-    /** Legacy Support */
+    /**
+     * Legacy support — registers a Replace set that sends air (block ID {@code 0}) to the given
+     * positions, effectively hiding every block at those locations for the target player.
+     * Equivalent to calling {@link #addReplace(UUID, String, Vector3i[], int)} with a block ID of
+     * {@code 0}. If a set with the same {@code setId} already exists it is replaced.
+     *
+     * @param playerId  the target player's UUID
+     * @param setId     a unique identifier for this set within the manager
+     * @param positions positions whose blocks will be hidden from the player
+     * @deprecated Prefer {@link #addReplace(UUID, String, Vector3i[], int)} with an explicit block ID.
+     */
+    @Deprecated
     @SuppressWarnings("unused")
     public void addFakeDoors(@Nonnull UUID playerId, @Nonnull String setId, @Nonnull Vector3i[] positions) {
         addReplace(playerId, setId, positions, 0, (byte) 0);
     }
 
-    /** Legacy Support */
+    /**
+     * Legacy support — registers a Replace set that sends air (block ID {@code 0}) to every
+     * position inside the axis-aligned bounding box defined by {@code min} and {@code max},
+     * effectively hiding those blocks for the target player.
+     * The bounding box is expanded into a flat {@code Vector3i[]} via
+     * {@link #expandBoundingBox(Vector3i, Vector3i)} before being forwarded to
+     * {@link #addReplace(UUID, String, Vector3i[], int, byte)}.
+     * If a set with the same {@code setId} already exists it is replaced.
+     *
+     * @param playerId the target player's UUID
+     * @param setId    a unique identifier for this set within the manager
+     * @param min      the minimum corner (inclusive) of the bounding box
+     * @param max      the maximum corner (inclusive) of the bounding box
+     * @deprecated Prefer {@link #addReplace(UUID, String, Vector3i[], int)} with an explicit block ID
+     *             and a pre-expanded position array.
+     */
+    @Deprecated
     @SuppressWarnings("unused")
     public void addFakeDoors(@Nonnull UUID playerId, @Nonnull String setId, @Nonnull Vector3i min, @Nonnull Vector3i max) {
         addReplace(playerId, setId, expandBoundingBox(min, max), 0, (byte) 0);
